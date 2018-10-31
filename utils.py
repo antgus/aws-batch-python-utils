@@ -2,9 +2,17 @@ from datetime import datetime
 import time
 from pprint import pprint
 from typing import List, Optional
+from enum import Enum
+import json
 
 _batch_client = None
 _cw_client = None
+
+_LOG_GROUP = '/aws/batch/job'  # default set by aws
+
+
+class JobFailedException(Exception):
+    pass
 
 
 def set_batch_client(batch_client):
@@ -21,42 +29,61 @@ def set_cloudwatch_client(cw_client):
     _cw_client = cw_client
 
 
+def get_cloudwatch_client():
+    return _cw_client
+
 def get_cw_client():
     return _cw_client
 
 
 def get_job_definition(job_definition_name: str) -> dict:
-    client = get_batch_client()
-    client.describe_job_definitions(jobDefinitionName=job_definition_name)
+    rsp = get_batch_client().describe_job_definitions(jobDefinitionName=job_definition_name)
+    assert('nextToken' not in rsp)  # no support for pagination yet.
+    # pick the job definition with highest revision
+    return sorted(rsp['jobDefinitions'], key=lambda x: -x['revision'])[0]
 
 
-def update_job_definition(job_definition_name: str, job_def: dict) -> None:
+def update_job_definition(new_job_def: dict) -> dict:
     """
     Takes the provided job definition as the correct version.
     Updates the version stored in AWS Batch if it doesn't match the provided job definition
     """
-    job_def_in_batch = get_job_definition(job_definition_name=job_definition_name)
+    job_definition_name = new_job_def['jobDefinitionName']
+    full_job_def = get_job_definition(job_definition_name=job_definition_name)
 
-    _remove_version_metadata_from_job_definition(job_def_in_batch)
+    job_def = _remove_version_metadata_from_job_definition(full_job_def)
 
-    if job_def != job_def_in_batch:
+    if new_job_def != job_def:
         print("")
         print("Job Definition in AWS Batch:")
-        pprint(job_def_in_batch)
-        print("local Job Definition:")
         pprint(job_def)
+        print("local Job Definition:")
+        pprint(new_job_def)
         print("Updating the job definition in AWS Batch to match the local version:")
-        rsp = _batch_client.register_job_definition(**job_def)
+        rsp = _batch_client.register_job_definition(**new_job_def)
         print("Done creating job definition with ARN: %s" % rsp['jobDefinitionArn'])
         time.sleep(20)  # required because job_definition API does not provide read-after-write consistency
-        updated_job_def = get_job_definition(job_definition_name=job_definition_name)
-        _remove_version_metadata_from_job_definition(updated_job_def)
-        if job_def != updated_job_def:
+        full_job_def = get_job_definition(job_definition_name=job_definition_name)
+        job_def = _remove_version_metadata_from_job_definition(full_job_def)
+        if new_job_def != job_def:
             print("Local definition:")
-            pprint(job_def)
+            pprint(new_job_def)
             print("Definition in AWS Batch:")
-            pprint(updated_job_def)
-            raise AssertionError("local job_def differs from the one found in batch")
+            pprint(job_def)
+            raise AssertionError("local job_def differs from the one found in batch, after updating")
+    else:
+        print("Skipping update of job definition as version in AWS Batch matches local version")
+    return full_job_def
+
+
+def update_job_definition_from_file(json_file_path: str) -> dict:
+    job_def = read_job_definition_from_file(json_file_path)
+    return update_job_definition(job_def)
+
+
+def read_job_definition_from_file(json_file_path: str) -> str:
+    with open(json_file_path, "r") as f:
+        return json.load(f)
 
 
 def _is_equivalent_job_definition(job_def_a: dict, job_def_b: dict) -> bool:
@@ -77,92 +104,105 @@ def _is_equivalent_job_definition(job_def_a: dict, job_def_b: dict) -> bool:
 
 
 def _remove_version_metadata_from_job_definition(job_def: Optional[dict]):
+    """Returns a new dict. Changes are not inplace"""
+    job_def = job_def.copy()
     if job_def is not None:
         for key in ['jobDefinitionArn', 'revision', 'status']:
             del job_def[key]
+    return job_def
 
 
-def update_job_definition_from_file(path_to_local_job_def: str):
+def submit_job(command: List[str], job_definition_arn: str, job_name: str, job_queue: str) -> str:
 
-    pass
+    container_overrides = {'command': command}
 
-
-def update_job_definition(local_job_def: dict):
-    pass
-
-
-def submit_job(stuff) -> None:
-
-    submit_job_resp = client.submit_job(
+    rsp = get_batch_client().submit_job(
         jobName=job_name,
         jobQueue=job_queue,
-        jobDefinition=job_definition['jobDefinitionArn'],
+        jobDefinition=job_definition_arn,
         containerOverrides=container_overrides
     )
-    pass
+    job_id = rsp['jobId']
+    print(f"Successfully submitted job_id={job_id}")
+    return job_id
 
 
-JOB_STATUS = []
-
-
-def track_job(job_id: int, cloudwatch_client, max_log_lines: Optional[int]=None) -> None:
+def track_job(job_id: str, max_log_lines: Optional[int]=None, raise_on_failure=True) -> None:
     """
     Track the status of the given job, outputting the status and logged data as retrieved from cloudwatch
     :param job_id:
     :param max_log_lines the maximum lines of log output to retrieve from cloudwatch per 5 second interval. This limits
     the amount of data retrieved.
     :param limit parameter used in cloudwatch fetch
+    :raises JobFailedException
     """
-    running = False
-    start_time = 0
-    status = ''
+    start_ts = 0
     sleep_duration = 4
 
     while True:
-        job_description = _batch_client.describe_jobs(jobs=[job_id])
-        status = job_description['jobs'][0]['status']
-        log_stream_name = job_description['jobs'][0]['container']['logStreamName']
-        job_name = pass # todo
+        job_descriptions = _batch_client.describe_jobs(jobs=[job_id])
+        assert(len(job_descriptions['jobs']) == 1)  # there should only be one job with the given id
+        job = job_descriptions['jobs'][0]
+        status = job['status']
+        job_name = job['jobName']
 
-        (start_ts, log_lines) = _get_logs(log_group_name, log_stream_name, start_time, max_log_lines=max_log_lines)
-        start_ts += 1
+        if status == 'RUNNING':
+            log_stream_name = job['container']['logStreamName']
+            start_ts += 1
+            (start_ts, log_lines) = _get_logs(log_stream_name, start_ts)
+            if len(log_lines) > 0:
+                print(('\n'.join(log_lines)))
 
-        print('-' * 80)
-        if len(log_lines) > 0:
-            print(('\n'.join(log_lines)))
-
-        print('-' * 80)
-        print(('Job [%s - %s] %s' % (job_name, job_id, status)))
+        print(f'JobTracker[{time.asctime()}]: job={job_name} - {job_id} {status}')
 
         if status == 'SUCCEEDED':
             break
         elif status == 'FAILED':
-            fail_reason = job_description['jobs'][0]['reason']
+            pprint(job)
+            fail_reason = job['statusReason']
             print(('Fail Reason: %s' % fail_reason))
-            # todo
-            # Sleep to make sure logs reach cw
-            # todo print the tail of the logs.
-            break
+            time.sleep(10) # Sleep to increase odds that logs reach cloudwatch
+            if 'logStreamName' in job['container']:
+                log_stream_name = job['container']['logStreamName']
+                rows = _get_log_tail(log_stream_name)
+                if len(rows) > 0:
+                    print(('\n'.join(rows)))
+
+            if raise_on_failure:
+                raise JobFailedException(f"job={job_name} - {job_id} {status} - Fail reason: {fail_reason}]")
 
         time.sleep(sleep_duration)
     pass
 
 
-def _get_logs(log_group_name: str, log_stream_name: str, start_time: int):
+def _get_log_tail(log_stream_name: str) -> List[str]:
     result = []
-    kwargs = {'logGroupName': log_group_name,
+    kwargs = {'logGroupName': _LOG_GROUP,
+              'logStreamName': log_stream_name,
+              'startFromHead': False}
+
+    log_events = get_cloudwatch_client().get_log_events(**kwargs)
+
+    for event in log_events['events']:
+        result.append(_parse_log_event(event))
+
+    return result
+
+
+def _get_logs(log_stream_name: str, start_time: int):
+    result = []
+    kwargs = {'logGroupName': _LOG_GROUP,
               'logStreamName': log_stream_name,
               'startTime': start_time,
               'startFromHead': True}
 
-    last_ts = 0
+    last_ts = start_time
     while True:
-        log_events = _cw_client.get_log_events(**kwargs)
+        log_events = get_cloudwatch_client().get_log_events(**kwargs)
 
         for event in log_events['events']:
             last_ts = event['timestamp']
-            timestamp = datetime.utcfromtimestamp(last_ts / 1000.0).isoformat()
-            result.append('[%s] %s' % ((timestamp + ".000")[:23] + 'Z', event['message']))
+            result.append(_parse_log_event(event))
 
         next_token = log_events.get('nextForwardToken', None)
         if next_token and kwargs.get('nextToken') != next_token:
@@ -170,3 +210,8 @@ def _get_logs(log_group_name: str, log_stream_name: str, start_time: int):
         else:
             break
     return last_ts, result
+
+
+def _parse_log_event(event: dict) -> str:
+    timestamp = datetime.utcfromtimestamp(event['timestamp'] / 1000.0).isoformat()
+    return '[%s] %s' % ((timestamp + ".000")[:23] + 'Z', event['message'])
