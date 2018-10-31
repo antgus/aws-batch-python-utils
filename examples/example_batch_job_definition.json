@@ -1,0 +1,22 @@
+{
+  "jobDefinitionName": "job_name_here",
+  "type": "container",
+  "parameters": {},
+  "retryStrategy": {
+    "attempts": 1
+  },
+  "containerProperties": {
+    "image": "xxxxxx.dkr.ecr.us-east-1.amazonaws.com/xxxxxx_replace_this_with_your_image",
+    "vcpus": 2,
+    "memory": 8000,
+    "command": [],
+    "volumes": [],
+    "mountPoints": [],
+    "environment": [],
+    "ulimits": [],
+    "jobRoleArn": "arn:aws:iam::XXXX:role/JOB_ROLE_HERE"
+  },
+  "timeout": {
+    "attemptDurationSeconds": 6000
+  }
+}
