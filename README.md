@@ -13,11 +13,14 @@ Step 2: execute `update_job_definition_from_file(...)`, which will push the loca
 Step 3: submit the job with `submit_job(...)`
 Step 4: track job progress with `track_job(job_id)`, which polls aws batch and cloudwatch for job status and recently logged lines
 
-``` 
-job_def_file = os.path.join(os.path.dirname(os.path.realpath(__file__)), "example_batch_job_definition.json")
-job_def = update_job_definition_from_file(job_def_file)
+```
+# updates job definition in AWS Batch based on provided json file 
+job_def = update_job_definition_from_file(job_def_file)  
 
+# submits job to aws batch
 job_id = submit_job(command, job_definition_arn=job_def['jobDefinitionArn'], job_name=job_name, job_queue=job_queue)
+
+# prints job status and log to stdout  
 track_job(job_id)
 ```
 
