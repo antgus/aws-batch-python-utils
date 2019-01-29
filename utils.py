@@ -10,6 +10,14 @@ _cw_client = None
 
 _LOG_GROUP = '/aws/batch/job'  # default set by aws
 
+JOB_STATUS = []  #
+
+
+class JobStatus(Enum):
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
 
 class JobFailedException(Exception):
     pass
@@ -35,13 +43,15 @@ def get_cloudwatch_client():
 def get_cw_client():
     return _cw_client
 
-
-def get_job_definition(job_definition_name: str) -> dict:
+def get_job_definition(job_definition_name: str) -> Optional[dict]:
     rsp = get_batch_client().describe_job_definitions(jobDefinitionName=job_definition_name)
     assert('nextToken' not in rsp)  # no support for pagination yet.
-    # pick the job definition with highest revision
-    return sorted(rsp['jobDefinitions'], key=lambda x: -x['revision'])[0]
-
+    job_definitions = rsp['jobDefinitions']
+    if len(job_definitions) == 0:
+        return None
+    else:
+        # pick the job definition with highest revision
+        return sorted(job_definitions, key=lambda x: -x['revision'])[0]
 
 def update_job_definition(new_job_def: dict) -> dict:
     """
@@ -103,10 +113,10 @@ def _is_equivalent_job_definition(job_def_a: dict, job_def_b: dict) -> bool:
                 return False
 
 
-def _remove_version_metadata_from_job_definition(job_def: Optional[dict]):
+def _remove_version_metadata_from_job_definition(job_def: Optional[dict]) -> Optional[dict]:
     """Returns a new dict. Changes are not inplace"""
-    job_def = job_def.copy()
     if job_def is not None:
+        job_def = job_def.copy()
         for key in ['jobDefinitionArn', 'revision', 'status']:
             del job_def[key]
     return job_def
@@ -127,14 +137,14 @@ def submit_job(command: List[str], job_definition_arn: str, job_name: str, job_q
     return job_id
 
 
-def track_job(job_id: str, max_log_lines: Optional[int]=None, raise_on_failure=True) -> None:
+def track_job(job_id: str, max_log_lines: Optional[int]=None, raise_on_failure=True) -> JobStatus:
     """
     Track the status of the given job, outputting the status and logged data as retrieved from cloudwatch
     :param job_id:
     :param max_log_lines the maximum lines of log output to retrieve from cloudwatch per 5 second interval. This limits
     the amount of data retrieved.
     :param limit parameter used in cloudwatch fetch
-    :raises JobFailedException
+    :raises JobFailedException if raise_on_failure=True and job fails
     """
     start_ts = 0
     sleep_duration = 4
